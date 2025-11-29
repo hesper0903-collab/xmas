@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>XMAS ARCHITECT: FINAL FIXED</title>
+    <title>XMAS ARCHITECT: V-MODE</title>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
@@ -41,9 +41,13 @@
         .status-list li { margin-bottom: 8px; display: flex; align-items: center; transition: color 0.3s; }
         .indicator { width: 6px; height: 6px; background-color: #222; margin-right: 12px; box-shadow: 0 0 0px transparent; transition: all 0.3s; }
         .active-state { color: #fff !important; }
+        
+        /* Indicators Colors */
         .ind-green { background-color: #0f0; box-shadow: 0 0 8px #0f0; }
         .ind-cyan { background-color: #0ff; box-shadow: 0 0 8px #0ff; }
         .ind-red { background-color: #f00; box-shadow: 0 0 10px #f00; transform: scale(1.5); }
+        .ind-gold { background-color: #ffd700; box-shadow: 0 0 8px #ffd700; } /* V-Gesture Color */
+
         .real-time-data { display: grid; grid-template-columns: 1fr 1fr; gap: 15px 40px; font-size: 12px; color: #0a0; }
         .data-item span { display: block; font-size: 14px; font-weight: bold; color: #eee; margin-top: 2px; }
         #fs-btn {
@@ -74,7 +78,8 @@
                 <ul class="status-list">
                     <li id="li-cam"><div class="indicator" id="ind-cam"></div>CAM FEED</li>
                     <li id="li-track"><div class="indicator" id="ind-track"></div>HAND TRACK</li>
-                    <li id="li-pinch"><div class="indicator" id="ind-pinch"></div>PINCH LOCK (ROTATE)</li>
+                    <li id="li-pinch"><div class="indicator" id="ind-pinch"></div>PINCH LOCK (360° DRAG)</li>
+                    <li id="li-victory"><div class="indicator" id="ind-victory"></div>V-MODE (AUTO SPIN)</li>
                     <li id="li-fist"><div class="indicator" id="ind-fist"></div>FIST MORPH (NEXT)</li>
                 </ul>
             </div>
@@ -96,7 +101,8 @@
             particleCount: 9000, 
             particleSize: 0.18,  
             scatterSpeed: 0.12, 
-            rotationSpeed: 0.8, // 1. 调整为 0.8
+            rotationSpeed: 0.8, // 基础转速
+            dragSensitivity: 0.3, 
             modelScale: 1.0,    
             distortion: 0.005,  
             repulseRadius: 20.0,
@@ -122,9 +128,16 @@
         let rotationGroup; 
         let neonTexture, techJointTexture;
         
+        // 交互状态
         let isPinching = false;
         let isFist = false;
+        let isVictory = false; // 新增状态
         let lastFistTime = 0;
+        
+        // 拖拽旋转逻辑变量
+        let previousHandX = 0;
+        let previousHandY = 0; 
+        let wasPinching = false;
 
         const videoElement = document.getElementById('webcam-video');
         const loader = document.getElementById('loader');
@@ -227,7 +240,6 @@
                         const h = 11; const yNorm = Math.random(); y = (yNorm - 0.5) * h + 1;
                         const rBase = (1 - yNorm) * 5.5; const angle = yNorm * 25 + Math.random() * 6.28;
                         x = Math.cos(angle) * rBase * (0.7 + Math.random()*0.3); z = Math.sin(angle) * rBase * (0.7 + Math.random()*0.3);
-                        
                         const distFromCenter = Math.sqrt(x*x + z*z) / rBase;
                         tempColor.setHex(CONFIG.colors[Math.floor(Math.random() * CONFIG.colors.length)]);
                         const brightness = (0.5 + (y + 5) / 15 * 0.8) * (1.2 - distFromCenter * 0.5); 
@@ -255,10 +267,8 @@
                         tempColor.multiplyScalar(0.9 + Math.random()*0.3);
                     }
                 } 
-                // 2. 礼盒改进：无盒身丝带，大蝴蝶结
                 else if (type === 'GIFT BOX') {
                     const s = 6.0; 
-                    // 90% 的点用于盒子主体
                     if (i < count * 0.9) {
                         x=(Math.random()-0.5)*s; y=(Math.random()-0.5)*s; z=(Math.random()-0.5)*s;
                         if(Math.random()>0.3) { 
@@ -266,13 +276,11 @@
                         }
                         tempColor.setHex(CONFIG.colors[Math.floor(Math.random() * CONFIG.colors.length)]);
                     } else {
-                        // 10% 的点用于顶部超大蝴蝶结
                         const t = Math.random() * Math.PI * 2;
-                        const bowSize = 2.2; // 增大尺寸
-                        // 花瓣形双环
+                        const bowSize = 2.5; 
                         x = Math.sin(t) * bowSize * (Math.cos(t)*0.5 + 1); 
                         z = Math.cos(t) * Math.sin(t) * bowSize; 
-                        y = s/2 + 0.5 + Math.random()*1.0; // 稍微加高厚度
+                        y = s/2 + 0.5 + Math.random()*1.0; 
                         tempColor.setHex(CONFIG.candyRed);
                         tempColor.multiplyScalar(1.5); 
                     }
@@ -307,9 +315,34 @@
                 const palm = handLandmarksRaw[9]; handPos = new THREE.Vector3((0.5-palm.x)*30, (0.5-palm.y)*25, 0);
             }
             
-            // 顺时针旋转，捏合时加速
-            if (isPinching) rotationGroup.rotation.y -= CONFIG.rotationSpeed * delta * 3.0; 
-            else rotationGroup.rotation.y -= 0.1 * delta;
+            // --- 旋转控制逻辑 ---
+            if (handPos && isPinching) {
+                // 1. 优先：捏合拖拽 (360度自由旋转)
+                if (!wasPinching) {
+                    previousHandX = handPos.x;
+                    previousHandY = handPos.y; 
+                    wasPinching = true;
+                } else {
+                    const deltaX = handPos.x - previousHandX;
+                    const deltaY = handPos.y - previousHandY;
+                    rotationGroup.rotation.y += deltaX * CONFIG.dragSensitivity; 
+                    rotationGroup.rotation.x += deltaY * CONFIG.dragSensitivity;
+                    previousHandX = handPos.x;
+                    previousHandY = handPos.y;
+                }
+            } else if (isVictory) {
+                // 2. 其次：比耶 (自动水平旋转，速度0.8)
+                wasPinching = false;
+                // 顺时针旋转 Y 轴，速度约为 0.8 rad/s (调节系数适配帧率)
+                rotationGroup.rotation.y -= 0.05 * delta * 16; // 0.05 * 16 = 0.8
+                // 自动回正 X 轴倾斜
+                rotationGroup.rotation.x *= 0.9;
+            } else {
+                // 3. 最后：闲置 (极慢速转动)
+                wasPinching = false;
+                rotationGroup.rotation.y -= 0.1 * delta * CONFIG.rotationSpeed;
+                rotationGroup.rotation.x *= 0.95; 
+            }
 
             rotationGroup.scale.setScalar(CONFIG.modelScale);
             material.size = CONFIG.particleSize * CONFIG.modelScale;
@@ -336,15 +369,41 @@
         }
 
         function detectGestures(landmarks) {
-            if (!landmarks) { isPinching=false; isFist=false; uiState('track',false); uiState('pinch',false); uiState('fist',false); return; }
+            if (!landmarks) { 
+                isPinching=false; isFist=false; isVictory=false;
+                uiState('track',false); uiState('pinch',false); uiState('fist',false); uiState('victory', false);
+                return; 
+            }
             uiState('track', true);
+
+            // 1. Pinch Detection
             const dPinch = Math.hypot(landmarks[4].x-landmarks[8].x, landmarks[4].y-landmarks[8].y);
             if (dPinch < 0.05) { isPinching = true; uiState('pinch', true); } else { isPinching = false; uiState('pinch', false); }
+
+            // 2. Fist Detection
             const tips=[8,12,16,20]; const wrist=landmarks[0]; let dFist=0; tips.forEach(i=>dFist+=Math.hypot(landmarks[i].x-wrist.x, landmarks[i].y-wrist.y)); dFist/=4;
             if (dFist < 0.15) {
                 if(!isFist && Date.now()-lastFistTime>1000) { triggerNext(); lastFistTime=Date.now(); uiState('fist', true); setTimeout(()=>uiState('fist', false), 300); }
                 isFist = true;
             } else { isFist = false; }
+
+            // 3. Victory (V-Sign) Detection
+            // 简单判断：食指(8)和中指(12)伸直，无名指(16)和小指(20)弯曲
+            // 判定伸直/弯曲：指尖到手腕距离
+            const distWrist = (idx) => Math.hypot(landmarks[idx].x - landmarks[0].x, landmarks[idx].y - landmarks[0].y);
+            const dIndex = distWrist(8);
+            const dMid = distWrist(12);
+            const dRing = distWrist(16);
+            const dPinky = distWrist(20);
+            
+            // 阈值判断：食指中指远离手腕，无名小指靠近手腕
+            if (dIndex > 0.25 && dMid > 0.25 && dRing < 0.2 && dPinky < 0.2 && !isPinching && !isFist) {
+                isVictory = true;
+                uiState('victory', true);
+            } else {
+                isVictory = false;
+                uiState('victory', false);
+            }
         }
         function triggerNext() {
             currentShapeIndex = (currentShapeIndex+1)%SHAPES.length; projNameEl.innerText = SHAPES[currentShapeIndex];
@@ -355,10 +414,10 @@
             const ind=document.getElementById('ind-'+id); const li=document.getElementById('li-'+id);
             if(active) { 
                 li.classList.add('active-state'); 
-                // 修复：Cam Feed 也会变绿
                 if(id==='cam' || id==='track') ind.classList.add('ind-green'); 
                 if(id==='pinch') ind.classList.add('ind-cyan'); 
                 if(id==='fist') ind.classList.add('ind-red'); 
+                if(id==='victory') ind.classList.add('ind-gold'); 
             }
             else { li.classList.remove('active-state'); ind.className='indicator'; }
         }
